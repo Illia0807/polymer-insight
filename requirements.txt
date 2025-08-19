@@ -1,9 +1,8 @@
-# Основные библиотеки, которые использует твой код
-streamlit
-streamlit-chromadb-connection
-pandas
-numpy
-rdkit
-joblib
-lightgbm
-tqdm
+streamlit==1.25.0
+pandas==2.0.3
+numpy==1.25.2
+rdkit==2023.9.1
+joblib==1.3.2
+lightgbm==4.0.0
+tqdm==4.66.1
+chromadb==0.4.14
