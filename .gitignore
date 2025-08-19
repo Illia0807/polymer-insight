@@ -1,0 +1,16 @@
+# Python files that are created by the interpreter
+__pycache__/
+
+# Virtual environments
+venv/
+.venv/
+
+# IDE/Editor specific files
+.vscode/
+.idea/
+
+# Your database files that should not be tracked by Git
+chroma_db/
+
+# Streamlit-related caches and temporary files
+.streamlit/
