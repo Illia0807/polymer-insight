@@ -6,4 +6,4 @@ lightgbm
 joblib
 tqdm
 rdkit
-chromadb
+chromadb --no-binary :all:
