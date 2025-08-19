@@ -3,7 +3,8 @@ pandas
 numpy
 scikit-learn
 lightgbm
+rdkit-pypi==2022.9.5
+chromadb
+hnswlib
 joblib
 tqdm
-rdkit
-chromadb --no-binary :all:
