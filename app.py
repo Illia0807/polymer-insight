@@ -5,22 +5,21 @@ import joblib
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 import numpy as np
+import chromadb
 import os
-
-# Импортируем новую библиотеку
-from streamlit_chromadb_connection.chromadb_connection import ChromadbConnection
 
 # Get the absolute path of the current directory where the app is located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- Session State Initialization ---
-# Инициализируем переменные, если они еще не существуют в состоянии сессии
 if 'predictions' not in st.session_state:
     st.session_state.predictions = None
+if 'explanation_property' not in st.session_state:
+    st.session_state.explanation_property = None
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 
-# Словарь с единицами измерения для каждого свойства
+# Dictionary with units for each property
 UNITS = {
     'FFV': 'dimensionless',
     'Density': 'g/cm³',
@@ -28,18 +27,19 @@ UNITS = {
     'Rg': 'nm'
 }
 
-# Пути к файлам моделей
+# Paths to model files
 MODELS_PATH = os.path.join(BASE_DIR, 'models')
+# Path to ChromaDB
 CHROMA_DB_PATH = os.path.join(BASE_DIR, 'chroma_db')
 
-# Загрузка обученного импьютера для обработки пропущенных значений
+# Load the trained imputer
 try:
     imputer = joblib.load(os.path.join(MODELS_PATH, 'imputer.pkl'))
 except FileNotFoundError:
-    st.error("Ошибка: 'imputer.pkl' не найден. Пожалуйста, запустите скрипт для обучения моделей.")
+    st.error("Error: 'imputer.pkl' not found. Please run 'train_and_save.py'.")
     st.stop()
 
-# Загрузка обученных моделей
+# Load the trained models
 TARGETS_TO_PREDICT = ['FFV', 'Density', 'Tc', 'Rg']
 models = {}
 for target in TARGETS_TO_PREDICT:
@@ -47,31 +47,29 @@ for target in TARGETS_TO_PREDICT:
         model_filename = f'lgbm_{target}.pkl'
         models[target] = joblib.load(os.path.join(MODELS_PATH, model_filename))
     except FileNotFoundError:
-        st.error(f"Ошибка: '{model_filename}' не найден. Пожалуйста, запустите скрипт для обучения моделей.")
+        st.error(f"Error: '{model_filename}' not found. Please run 'train_and_save.py'.")
         st.stop()
 
-# --- Инициализация клиента ChromaDB через st.connection ---
+# Initialize ChromaDB client
 try:
-    # Передаем конфигурацию для PersistentClient с путем к базе данных
-    conn = st.connection("chromadb",
-                         type=ChromadbConnection,
-                         client="PersistentClient",
-                         path=CHROMA_DB_PATH)
+    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
     
-    # Получаем коллекцию из соединения
-    collection = conn.get_collection(name="polymer_facts")
+    # Check if the collection exists
+    try:
+        collection = client.get_collection(name="polymer_facts")
+    except ValueError:
+        st.error("Error: Collection 'polymer_facts' not found. Please run 'create_db.py'.")
+        st.stop()
 
 except Exception as e:
-    st.error(f"Ошибка подключения к базе данных ChromaDB: {e}.")
+    st.error(f"Error connecting to the ChromaDB database: {e}. Make sure you have created the database.")
     st.stop()
 
-
-# --- Функции для обработки данных ---
+# --- Data handling functions ---
 def get_rdkit_descriptors(smiles):
-    """Вычисляет набор дескрипторов RDKit для заданной SMILES строки."""
     mol = Chem.MolFromSmiles(smiles)
     if not mol:
-        return [np.nan] * 15  # Возвращаем NaN, если SMILES некорректен
+        return [np.nan] * 15
     descriptors = [
         Descriptors.MolWt(mol), Descriptors.TPSA(mol), Descriptors.MolLogP(mol),
         Descriptors.NumRotatableBonds(mol), Descriptors.NumHDonors(mol),
@@ -84,19 +82,15 @@ def get_rdkit_descriptors(smiles):
     return descriptors
 
 def predict_polymer_properties(smiles_string):
-    """Предсказывает свойства полимера по его SMILES строке."""
     FEATURES = [f'desc_{i}' for i in range(15)]
     new_data = pd.DataFrame({'SMILES': [smiles_string]})
     
-    # Вычисляем дескрипторы
-    desc_series = new_data['SMILES'].apply(lambda x: pd.Series(get_rdkit_descriptors(x)))
-    desc_series.columns = FEATURES
-    new_data = pd.concat([new_data, desc_series], axis=1)
-
-    # Обрабатываем пропуски
+    new_data[[f'desc_{i}' for i in range(15)]] = new_data['SMILES'].apply(
+        lambda x: pd.Series(get_rdkit_descriptors(x))
+    )
+    
     new_data[FEATURES] = imputer.transform(new_data[FEATURES])
     
-    # Делаем предсказания
     predictions = {}
     for target in TARGETS_TO_PREDICT:
         prediction = models[target].predict(new_data[FEATURES])[0]
@@ -104,65 +98,66 @@ def predict_polymer_properties(smiles_string):
     
     return predictions
 
-# --- Функции чат-бота ---
+# --- Chatbot Functions ---
 def retrieve_and_explain(user_question):
-    """Извлекает факты из ChromaDB для ответа на вопрос пользователя."""
-    try:
-        results = collection.query(
-            query_texts=[user_question],
-            n_results=5  # Извлекаем несколько фактов для лучшего ответа
-        )
-    except Exception as e:
-        return f"Произошла ошибка при запросе к базе данных: {e}"
+    # Retrieve facts from ChromaDB
+    results = collection.query(
+        query_texts=[user_question],
+        n_results=5  # Retrieve more facts to filter from
+    )
 
-    if not results or not results.get('documents') or not results['documents'][0]:
-        return "К сожалению, информация по вашему запросу не найдена."
+    if not results['documents'] or not results['documents'][0]:
+        return "Information related to your request was not found."
 
-    # Фильтруем дубликаты и объединяем факты
-    unique_facts = sorted(list(set(results['documents'][0])), key=len, reverse=True)
-    response_text = " ".join(unique_facts)
+    # Filter out duplicates and combine facts
+    unique_facts = set(results['documents'][0])
+    response_facts = list(unique_facts)
 
-    return response_text
+    # Simple logic to improve the response
+    words = user_question.lower().split()
+    if 'how' in words or 'why' in words:
+        # Try to find facts that explain "how" or "why"
+        facts = " ".join([fact for fact in response_facts if 'because' in fact or 'since' in fact])
+        if not facts:
+            facts = " ".join(response_facts)
+    else:
+        facts = " ".join(response_facts)
 
-# --- Интерфейс Streamlit ---
-st.title("Polymer Insight: предсказание и объяснение свойств")
-st.write("Введите SMILES строку полимера, и модель предскажет его физические свойства.")
+    return facts if facts else "Information related to your request was not found."
 
-smiles_input = st.text_area("Введите SMILES строку:", "*C(=O)c1ccc(C*)cc1", key='smiles_input')
+# --- Streamlit Interface ---
+st.title("Polymer Insight: Property Prediction & Explanation")
+st.write("Enter a SMILES string, and the model will predict its physical properties.")
 
-if st.button("Предсказать"):
+smiles_input = st.text_area("Enter SMILES string:", "*C(=O)c1ccc(C*)cc1", key='smiles_input')
+
+if st.button("Predict"):
     if smiles_input:
-        with st.spinner('Вычисляем свойства...'):
-            st.session_state.predictions = predict_polymer_properties(smiles_input)
-            st.session_state.messages = [] # Очищаем историю чата при новом предсказании
+        st.session_state.predictions = predict_polymer_properties(smiles_input)
 
 if st.session_state.predictions:
-    st.subheader("Предсказанные свойства:")
+    st.subheader("Predicted Properties:")
     predictions_with_units = {
-        'Свойство': list(st.session_state.predictions.keys()),
-        'Значение': list(st.session_state.predictions.values()),
-        'Единица изм.': [UNITS[prop] for prop in st.session_state.predictions.keys()]
+        'Property': list(st.session_state.predictions.keys()),
+        'Value': list(st.session_state.predictions.values()),
+        'Unit': [UNITS[prop] for prop in st.session_state.predictions.keys()]
     }
     predictions_df = pd.DataFrame(predictions_with_units)
-    st.table(predictions_df.style.format({'Значение': "{:.4f}"}))
+    st.table(predictions_df.style.format({'Value': "{:.4f}"}))
     
-    st.subheader("Задайте вопрос о свойствах полимера:")
-
-    # Отображаем историю чата
+    st.subheader("Ask a question about the polymer properties:")
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Поле для ввода нового сообщения
-    if prompt := st.chat_input("Например: почему такая плотность?"):
-        # Добавляем и отображаем сообщение пользователя
+    if prompt := st.chat_input("Ask about polymer properties..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Получаем и отображаем ответ ассистента
-        with st.spinner('Ищу информацию...'):
-            response = retrieve_and_explain(prompt)
-            with st.chat_message("assistant"):
-                st.markdown(response)
-            st.session_state.messages.append({"role": "assistant", "content": response})
+        facts = retrieve_and_explain(prompt)
+        with st.chat_message("assistant"):
+            st.markdown(facts)
+        st.session_state.messages.append({"role": "assistant", "content": facts})
+
+#hello world version 1
