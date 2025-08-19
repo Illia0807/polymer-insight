@@ -6,3 +6,4 @@ lightgbm
 joblib
 tqdm
 rdkit
+chromadb
