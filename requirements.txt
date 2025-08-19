@@ -7,3 +7,4 @@ rdkit==2025.3.5
 chromadb==1.0.20
 joblib==1.5.1
 tqdm==4.67.1
+streamlit-chromadb-connection
